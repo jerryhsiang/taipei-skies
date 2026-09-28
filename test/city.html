@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taipei Skies — city module test</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0a1420; overflow: hidden; }
+  #gl { display: block; width: 100%; height: 100%; }
+  #info { position: absolute; left: 12px; top: 10px; color: #e8eef4; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre; background: rgba(0, 0, 0, .4); padding: 8px 10px; border-radius: 6px; pointer-events: none; }
+  #err { position: absolute; left: 12px; right: 12px; bottom: 12px; color: #ffd7d7; background: #3b0f14; border: 1px solid #7a2b33;
+    font: 12px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; padding: 8px 10px; border-radius: 6px; display: none; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="info">loading…</div>
+<div id="err"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="../js/config.js"></script>
+<script src="../js/world.js"></script>
+<script>
+// ---- Stub FS.world when js/world.js is absent: flat land at 6 m, config rivers as water at 0 m, no waterDistance,
+// ---- paintGround() with an inner 2048 canvas (28 km) and an outer 1024 canvas (72 km), both drawn in world metres.
+(function () {
+  if (window.FS.world) return;
+  const FS = window.FS, CFG = FS.CONFIG;
+  function riverDepth(x, z) {
+    let best = -1e9;
+    for (const r of CFG.rivers) {
+      const p = r.points;
+      for (let i = 0; i + 1 < p.length; i++) {
+        const ax = p[i].x, az = p[i].z, dx = p[i + 1].x - ax, dz = p[i + 1].z - az, l2 = dx * dx + dz * dz;
+        let t = l2 > 0 ? ((x - ax) * dx + (z - az) * dz) / l2 : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const w = p[i].w + (p[i + 1].w - p[i].w) * t;
+        const d = w * 0.5 - Math.hypot(x - (ax + dx * t), z - (az + dz * t));
+        if (d > best) best = d;
+      }
+    }
+    return best;
+  }
+  const grounds = [];
+  FS.world = {
+    stub: true,
+    getHeight(x, z) { return riverDepth(x, z) > 0 ? 0 : 6; },
+    isWater(x, z) { return riverDepth(x, z) > 0; },
+    getGroundCanvases() { return grounds.map((g) => ({ canvas: g.canvas, rect: g.rect, pxPerM: g.pxPerM })); },
+    paintGround(fn) {
+      const specs = [
+        { rect: CFG.innerRect, size: 2048, isInner: true, y: 5.9 },
+        { rect: { x0: -CFG.worldHalfSize, z0: -CFG.worldHalfSize, x1: CFG.worldHalfSize, z1: CFG.worldHalfSize }, size: 1024, isInner: false, y: 5.7 },
+      ];
+      for (const s of specs) {
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = s.size;
+        const ctx = canvas.getContext('2d');
+        const pxPerM = s.size / (s.rect.x1 - s.rect.x0);
+        ctx.setTransform(pxPerM, 0, 0, pxPerM, -s.rect.x0 * pxPerM, -s.rect.z0 * pxPerM);
+        ctx.fillStyle = '#7f8b5c'; ctx.fillRect(s.rect.x0, s.rect.z0, s.rect.x1 - s.rect.x0, s.rect.z1 - s.rect.z0);
+        // rivers
+        ctx.strokeStyle = '#3f6a8a'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        for (const r of CFG.rivers) for (let i = 0; i + 1 < r.points.length; i++) {
+          ctx.lineWidth = (r.points[i].w + r.points[i + 1].w) / 2; ctx.beginPath();
+          ctx.moveTo(r.points[i].x, r.points[i].z); ctx.lineTo(r.points[i + 1].x, r.points[i + 1].z); ctx.stroke();
+        }
+        fn(ctx, { rect: s.rect, pxPerM, canvas, isInner: s.isInner });
+        const tex = FS.textureFromCanvas(canvas);
+        const w = s.rect.x1 - s.rect.x0, h = s.rect.z1 - s.rect.z0;
+        const geo = new THREE.PlaneGeometry(w, h); geo.rotateX(-Math.PI / 2);
+        const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex }));
+        mesh.position.set((s.rect.x0 + s.rect.x1) / 2, s.y, (s.rect.z0 + s.rect.z1) / 2);
+        mesh.receiveShadow = true;
+        FS.scene.add(mesh);
+        grounds.push({ canvas, rect: s.rect, pxPerM });
+      }
+    },
+    update() {}, setShadowFocus() {},
+  };
+})();
+</script>
+<script src="../js/city.js"></script>
+<script>
+(function () {
+  const FS = window.FS, info = document.getElementById('info'), errBox = document.getElementById('err');
+  function showError(msg) { errBox.style.display = 'block'; errBox.textContent += (errBox.textContent ? '\n' : '') + msg; }
+  window.addEventListener('error', (e) => showError(e.message || String(e.error || e)));
+
+  const canvas = document.getElementById('gl');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.85; // matches main.js
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  FS.renderer = renderer;
+  const scene = (FS.scene = new THREE.Scene());
+  const camera = (FS.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.3, 150000));
+  camera.position.set(4488, 600, 2700);
+
+  const sun = FS.CONFIG.sun, d = FS.geo.headingToDir(sun.azimuthDeg), ce = Math.cos(sun.elevationDeg * FS.geo.D2R);
+  const sunDir = new THREE.Vector3(d.x * ce, Math.sin(sun.elevationDeg * FS.geo.D2R), d.z * ce).normalize();
+  let light = null;
+  if (FS.world.stub) {
+    // stub world: our own sky colour, fog, sun + hemisphere light
+    scene.background = FS.color('#9cc4e4');
+    scene.fog = new THREE.Fog(FS.color('#c9d6e2'), 4000, 24000);
+    light = new THREE.DirectionalLight(FS.color('#fff1dc'), 1.6);
+    light.castShadow = true;
+    light.shadow.mapSize.set(2048, 2048);
+    light.shadow.camera.near = 100; light.shadow.camera.far = 8000;
+    light.shadow.camera.left = light.shadow.camera.bottom = -1500; light.shadow.camera.right = light.shadow.camera.top = 1500;
+    light.shadow.bias = -0.0005;
+    scene.add(light); scene.add(light.target);
+    scene.add(new THREE.HemisphereLight(FS.color('#cfe0f0'), FS.color('#6b6a55'), 0.65));
+  } else {
+    // real world module: terrain, sky, sun, fog and shadow focus come from it (same order as main.js)
+    try { FS.world.init(scene, renderer); } catch (e) { showError('world.init threw: ' + (e.stack || e)); }
+  }
+
+  // orbit target: Taipei 101
+  const l101 = FS.CONFIG.landmarks.find((l) => l.name === 'Taipei 101') || { x: 4488, z: 1780 };
+  const target = new THREE.Vector3(l101.x, 60, l101.z);
+  let t0 = performance.now();
+  try { FS.city.init(scene); } catch (e) { showError('city.init threw: ' + (e.stack || e)); }
+  const initMs = Math.round(performance.now() - t0);
+  target.y = Math.max(target.y, (FS.world.getHeight(target.x, target.z) || 0) + 60);
+  if (FS.world.stub && scene.children.filter((o) => o.isMesh && o.geometry && o.geometry.type === 'PlaneGeometry').length === 0) {
+    // if city.init did not call paintGround (e.g. it failed), still show a ground plane
+    FS.world.paintGround(() => {});
+  }
+
+  const stats = FS.city.stats || {};
+  const orbit = { alt: 600, radius: 900, speed: 0.06 };
+  let angle = 0, last = performance.now(), fpsAcc = 0, fpsN = 0, fps = 0;
+  function frame() {
+    requestAnimationFrame(frame);
+    const nowT = performance.now(), dt = Math.min(0.05, (nowT - last) / 1000); last = nowT;
+    fpsAcc += dt; fpsN++; if (fpsAcc > 0.5) { fps = Math.round(fpsN / fpsAcc); fpsAcc = 0; fpsN = 0; }
+    angle += dt * orbit.speed;
+    camera.position.set(target.x + Math.cos(angle) * orbit.radius, orbit.alt, target.z + Math.sin(angle) * orbit.radius);
+    camera.lookAt(target);
+    if (light) {
+      light.target.position.copy(target);
+      light.position.copy(target).addScaledVector(sunDir, 3000);
+    } else {
+      try {
+        if (FS.world.update) FS.world.update(dt, camera, target);
+        if (FS.world.setShadowFocus) FS.world.setShadowFocus(target, camera.position);
+      } catch (e) { /* keep rendering */ }
+    }
+    if (FS.city.update) FS.city.update(dt, camera.position);
+    renderer.render(scene, camera);
+    const r = renderer.info.render;
+    info.textContent = 'Taipei Skies — city test (orbit over Taipei 101 at 600 m)  ' + (FS.world.stub ? '[world stub]' : '[world.js]') +
+      '\nquality ' + (stats.quality || '?') + ' — keys 1/2/3 = low/medium/high' +
+      '\nbuildings ' + stats.buildings + ' in ' + stats.buildingTiles + ' tiles, trees ' + stats.trees + ', landmarks ' + stats.landmarks + ' (' + stats.landmarkMeshes + ' meshes), blocks ' + stats.blocks +
+      '\ninit ' + initMs + ' ms (' + JSON.stringify(stats.timing) + ')' +
+      '\ndraw calls ' + r.calls + ', triangles ' + r.triangles + ', fps ' + fps +
+      '\nobstacle top at 101: ' + (FS.city.getObstacleTop(l101.x, l101.z)).toFixed(0) + ' m';
+  }
+  // keys: 1/2/3 quality · arrows up/down = altitude · arrows left/right = orbit radius · space = pause orbit
+  window.addEventListener('keydown', (e) => {
+    const q = { Digit1: 'low', Digit2: 'medium', Digit3: 'high' }[e.code];
+    if (q && FS.city.setQuality) { FS.city.setQuality(q); }
+    if (e.code === 'ArrowUp') orbit.alt = Math.min(5000, orbit.alt * 1.25);
+    if (e.code === 'ArrowDown') orbit.alt = Math.max(40, orbit.alt / 1.25);
+    if (e.code === 'ArrowRight') orbit.radius = Math.min(8000, orbit.radius * 1.25);
+    if (e.code === 'ArrowLeft') orbit.radius = Math.max(120, orbit.radius / 1.25);
+    if (e.code === 'Space') orbit.speed = orbit.speed ? 0 : 0.06;
+  });
+  window.addEventListener('resize', () => {
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+  });
+  frame();
+})();
+</script>
+</body>
+</html>

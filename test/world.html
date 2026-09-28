@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taipei Skies — world test</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #0a1420; color: #e8eef4; font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; overflow: hidden; }
+  #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #info { position: absolute; left: 12px; top: 12px; margin: 0; padding: 10px 12px; background: rgba(6, 14, 24, 0.72); border: 1px solid rgba(120, 160, 200, 0.35); border-radius: 6px; white-space: pre; pointer-events: none; }
+  #err { position: absolute; left: 12px; right: 12px; bottom: 12px; margin: 0; padding: 8px 10px; background: #3b0f14; color: #ffd7d7; border-radius: 6px; white-space: pre-wrap; display: none; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<pre id="info">starting…</pre>
+<pre id="err"></pre>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="../js/config.js"></script>
+<script src="../js/world.js"></script>
+<script>
+(function () {
+  const info = document.getElementById('info'), errBox = document.getElementById('err');
+  const showErr = (m) => { errBox.style.display = 'block'; errBox.textContent += (errBox.textContent ? '\n' : '') + m; };
+  window.addEventListener('error', (e) => showErr(e.message || String(e.error || e)));
+
+  const canvas = document.getElementById('gl');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  FS.renderer = renderer;
+  const scene = new THREE.Scene();
+  FS.scene = scene;
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.3, 150000);
+
+  const t0 = performance.now();
+  FS.world.init(scene, renderer);
+  const initMs = Math.round(performance.now() - t0);
+
+  // a stand-in aircraft (casts a shadow) so setShadowFocus / shadows can be checked
+  const ac = new THREE.Mesh(new THREE.BoxGeometry(12, 3, 10), new THREE.MeshStandardMaterial({ color: FS.color('#e8e8f0') }));
+  ac.castShadow = true;
+  ac.position.set(3277, FS.world.getHeight(3277, -2145) + 40, -2145);
+  scene.add(ac);
+
+  // orbit: drag to rotate, wheel to zoom, WASD to move the target, R to reset.
+  // URL params: ?tx=&tz= (target, m) &yaw= &pitch= (deg) &dist= (m)   e.g. ?tx=3277&tz=-2145&yaw=125&pitch=10&dist=1500
+  const q = new URLSearchParams(location.search);
+  const num = (k, d) => { const v = parseFloat(q.get(k)); return isFinite(v) ? v : d; };
+  const D2R = Math.PI / 180;
+  const target = new THREE.Vector3(num('tx', 0), 0, num('tz', 0));
+  let yaw = num('yaw', 0) * D2R, pitch = num('pitch', 14.04) * D2R, dist = num('dist', 6185); // default: (0, 1500, 6000) looking at the origin
+  const tilt = num('tilt', 0) * D2R;
+  let dragging = false, lx = 0, ly = 0;
+  canvas.addEventListener('mousedown', (e) => { dragging = true; lx = e.clientX; ly = e.clientY; });
+  window.addEventListener('mouseup', () => { dragging = false; });
+  window.addEventListener('mousemove', (e) => { if (!dragging) return; yaw -= (e.clientX - lx) * 0.005; pitch = Math.max(-0.2, Math.min(1.5, pitch + (e.clientY - ly) * 0.005)); lx = e.clientX; ly = e.clientY; });
+  canvas.addEventListener('wheel', (e) => { dist *= Math.exp(e.deltaY * 0.001); dist = Math.max(30, Math.min(60000, dist)); e.preventDefault(); }, { passive: false });
+  const keys = new Set();
+  window.addEventListener('keydown', (e) => { keys.add(e.code); if (e.code === 'KeyR') { target.set(0, 0, 0); yaw = 0; pitch = 14.04 * D2R; dist = 6185; } });
+  window.addEventListener('keyup', (e) => keys.delete(e.code));
+  window.addEventListener('resize', () => { renderer.setSize(window.innerWidth, window.innerHeight, false); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); });
+
+  const clock = new THREE.Clock();
+  let frames = 0, fpsT = 0, fps = 0;
+  function frame() {
+    requestAnimationFrame(frame);
+    const dt = Math.min(clock.getDelta(), 0.05);
+    const spd = dist * 0.6 * dt;
+    if (keys.has('KeyW')) { target.x -= Math.sin(yaw) * spd; target.z -= Math.cos(yaw) * spd; }
+    if (keys.has('KeyS')) { target.x += Math.sin(yaw) * spd; target.z += Math.cos(yaw) * spd; }
+    if (keys.has('KeyA')) { target.x -= Math.cos(yaw) * spd; target.z += Math.sin(yaw) * spd; }
+    if (keys.has('KeyD')) { target.x += Math.cos(yaw) * spd; target.z -= Math.sin(yaw) * spd; }
+    target.y = FS.world.getHeight(target.x, target.z);
+    camera.position.set(
+      target.x + Math.sin(yaw) * Math.cos(pitch) * dist,
+      target.y + Math.sin(pitch) * dist,
+      target.z + Math.cos(yaw) * Math.cos(pitch) * dist);
+    const ground = FS.world.getHeight(camera.position.x, camera.position.z);
+    if (camera.position.y < ground + 3) camera.position.y = ground + 3;
+    camera.lookAt(target);
+    if (tilt) camera.rotateX(tilt); // &tilt=deg looks up (+) / down (-) from the target
+
+    FS.world.update(dt, camera, ac.position);
+    FS.world.setShadowFocus(ac.position, camera.position);
+    renderer.render(scene, camera);
+
+    frames++; fpsT += dt;
+    if (fpsT > 0.5) { fps = Math.round(frames / fpsT); frames = 0; fpsT = 0; }
+    const W = FS.world, ri = renderer.info.render;
+    info.textContent =
+      'Taipei Skies — world test   init ' + initMs + ' ms   ' + fps + ' fps   draw calls ' + ri.calls + '   tris ' + ri.triangles + '\n' +
+      'timings ' + JSON.stringify(W.stats.timings) + '\n' +
+      'getHeight Taipei 101 (4488, 1780)   = ' + W.getHeight(4488, 1780).toFixed(1) + ' m\n' +
+      'getHeight Qixing    (2521, -13269) = ' + W.getHeight(2521, -13269).toFixed(1) + ' m\n' +
+      'getHeight Songshan  (3277, -2145)  = ' + W.getHeight(3277, -2145).toFixed(1) + ' m\n' +
+      'isWater   Tamsui    (-5042, -6634) = ' + W.isWater(-5042, -6634) + '   waterDistance = ' + W.waterDistance(-5042, -6634).toFixed(0) + ' m\n' +
+      'camera (' + camera.position.x.toFixed(0) + ', ' + camera.position.y.toFixed(0) + ', ' + camera.position.z.toFixed(0) + ')  target (' + target.x.toFixed(0) + ', ' + target.z.toFixed(0) + ')\n' +
+      'drag: orbit · wheel: zoom · WASD: move · R: reset';
+  }
+  frame();
+})();
+</script>
+</body>
+</html>

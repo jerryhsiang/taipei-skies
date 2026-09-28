@@ -1,0 +1,5 @@
+.claude/
+dist/
+node_modules/
+dev.html
+.DS_Store

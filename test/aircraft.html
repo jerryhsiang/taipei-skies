@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Taipei Skies — aircraft model check</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0a1420; color: #e8eef4; font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; overflow: hidden; }
+  #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; cursor: crosshair; }
+  #info { position: absolute; left: 12px; top: 10px; background: rgba(8, 18, 30, 0.72); border: 1px solid #2a4258; border-radius: 6px; padding: 8px 10px; max-width: 420px; pointer-events: none; white-space: pre-wrap; }
+  #info b { color: #9fd8f5; }
+  #info .bad { color: #ff8a8a; }
+  #info .ok { color: #8fe3a8; }
+  #help { position: absolute; right: 12px; top: 10px; background: rgba(8, 18, 30, 0.72); border: 1px solid #2a4258; border-radius: 6px; padding: 8px 10px; pointer-events: none; color: #b9c9d6; }
+</style>
+</head>
+<body>
+<canvas id="gl" tabindex="0"></canvas>
+<div id="info">loading…</div>
+<div id="help">1 turntable · 2 cockpit (eye point, fov 68) · 3 chase · 4 front / 5 top · Space pause turntable
+W/S pitch · A/D roll · Q/E rudder · F flaps · Shift/Ctrl throttle · wheel throttle · B parking brake
+L toggle lights-only (dark) · G toggle ground</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>document.write('<script src="../js/config.js?v=' + Date.now() + '"><\/script>');</script>
+<script>
+  // stub peers: flat paved apron at 0 m, no water, no buildings, no runways
+  window.FS.world = { getHeight: () => 0, isWater: () => false };
+  window.FS.airports = { isOnRunway: () => null, isOnPaved: () => true, getRunwayEnds: () => [] };
+  window.FS.city = { getObstacleTop: () => -Infinity };
+</script>
+<script>document.write('<script src="../js/aircraft.js?v=' + Date.now() + '"><\/script>');</script>
+<script>
+(function () {
+  const FS = window.FS;
+  const canvas = document.getElementById('gl');
+  const info = document.getElementById('info');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  FS.renderer = renderer;
+  const scene = new THREE.Scene();
+  scene.background = FS.color('#9cc4e4');
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 2000);
+  FS.input.bind(canvas);
+
+  // lights (sun from the SW like the sim, elevation 34)
+  const hemi = new THREE.HemisphereLight(FS.color('#bfe0ff'), FS.color('#6b6a5a'), 0.7);
+  scene.add(hemi);
+  const sun = new THREE.DirectionalLight(FS.color('#fff2dc'), 1.6);
+  const az = 235 * Math.PI / 180, el = 34 * Math.PI / 180;
+  sun.position.set(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el)).multiplyScalar(40);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -14; sun.shadow.camera.right = sun.shadow.camera.top = 14;
+  sun.shadow.camera.near = 1; sun.shadow.camera.far = 120; sun.shadow.bias = -0.0005;
+  scene.add(sun);
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.MeshStandardMaterial({ color: FS.color('#6f6f6b'), roughness: 0.95 }));
+  ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+  const grid = new THREE.GridHelper(80, 40, FS.color('#9a9a94'), FS.color('#7d7d78'));
+  grid.position.y = 0.02; scene.add(grid);
+
+  FS.aircraft.init(scene);
+  FS.aircraft.reset({ x: 0, z: 0, heading: 0, onGround: true, speed: 0, throttle: 0, flaps: 0 });
+  FS.aircraft.setBrakes(true);
+  const ac = FS.aircraft;
+  const model = ac.model || ac.group;
+  const box = new THREE.Box3().setFromObject(model);
+  let meshes = 0; model.traverse((o) => { if (o.isMesh) meshes++; });
+  const need = ['prop', 'propDisc', 'aileronL', 'aileronR', 'flapL', 'flapR', 'elevator', 'rudder', 'navL', 'navR', 'navTail', 'beacon', 'strobeL', 'strobeR', 'wheels'];
+  const missing = need.filter((k) => !(ac.parts && ac.parts[k]));
+
+  let mode = 1, spin = true, angle = 0.6, dark = false, showGround = true, last = performance.now();
+  const modeFromHash = () => { const m = { turntable: 1, cockpit: 2, chase: 3, front: 4, top: 5 }[location.hash.replace('#', '')]; if (m) mode = m; };
+  modeFromHash(); window.addEventListener('hashchange', modeFromHash);
+  window.acTest = { setMode: (m) => { mode = m; }, setSpin: (b) => { spin = b; }, setAngle: (a) => { angle = a; } };
+  const clock = new THREE.Clock();
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Digit1') mode = 1; if (e.code === 'Digit2') mode = 2; if (e.code === 'Digit3') mode = 3; if (e.code === 'Digit4') mode = 4; if (e.code === 'Digit5') mode = 5;
+    if (e.code === 'Space') spin = !spin;
+    if (e.code === 'KeyL') { dark = !dark; sun.intensity = dark ? 0.05 : 1.6; hemi.intensity = dark ? 0.03 : 0.7; scene.background = FS.color(dark ? '#06101c' : '#9cc4e4'); }
+    if (e.code === 'KeyG') { showGround = !showGround; ground.visible = grid.visible = showGround; }
+  });
+  function resize() { const w = window.innerWidth, h = window.innerHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+  window.addEventListener('resize', resize); resize();
+
+  const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+  function frame() {
+    requestAnimationFrame(frame);
+    const dt = Math.min(clock.getDelta(), 0.05);
+    ac.update(dt);
+    const s = ac.state, g = ac.group;
+    if (spin) angle += dt * 0.25;
+    let fov = 50;
+    if (mode === 2) {
+      tmp.copy(ac.eyePoint); g.localToWorld(tmp);
+      camera.position.copy(tmp); camera.quaternion.copy(g.quaternion); camera.up.set(0, 1, 0); fov = 68;
+    } else if (mode === 3) {
+      tmp.copy(ac.chaseOffset).applyQuaternion(g.quaternion).add(g.position);
+      camera.position.copy(tmp); camera.up.set(0, 1, 0);
+      camera.lookAt(tmp2.copy(g.position).addScaledVector(s.forward, 12).addScaledVector(camera.up, 1));
+    } else if (mode === 4) {
+      camera.position.set(0, 1.2, -16); camera.up.set(0, 1, 0); camera.lookAt(0, 0.6, 0); fov = 40;
+    } else if (mode === 5) {
+      camera.position.set(0.01, 24, 0); camera.up.set(0, 0, -1); camera.lookAt(0, 0, 0); fov = 40;
+    } else {
+      const r = 15.5;
+      camera.position.set(Math.sin(angle) * r, 4.2 + Math.sin(angle * 0.5) * 1.5, Math.cos(angle) * r);
+      camera.up.set(0, 1, 0); camera.lookAt(0, 0.6, 0);
+    }
+    if (camera.fov !== fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
+    renderer.render(scene, camera);
+    FS.input.endFrame();
+    const now = performance.now();
+    if (now - last > 200) {
+      last = now;
+      const b = box;
+      info.innerHTML = '<b>' + ac.params.name + ' ' + ac.params.registration + '</b>  meshes ' + meshes +
+        '\nbbox x ' + b.min.x.toFixed(2) + '..' + b.max.x.toFixed(2) + '  y ' + b.min.y.toFixed(2) + '..' + b.max.y.toFixed(2) + '  z ' + b.min.z.toFixed(2) + '..' + b.max.z.toFixed(2) +
+        '\nparts: ' + (missing.length ? '<span class="bad">missing ' + missing.join(', ') + '</span>' : '<span class="ok">all present</span>') +
+        '\nthrottle ' + s.throttle.toFixed(2) + '  rpm ' + s.rpm.toFixed(0) + '  flaps ' + s.flaps + ' (' + s.flapPos.toFixed(2) + ')  brakes ' + s.brakes +
+        '\nelev ' + s.surfaces.elevator.toFixed(2) + '  ail ' + s.surfaces.aileron.toFixed(2) + '  rud ' + s.surfaces.rudder.toFixed(2) +
+        '\nhdg ' + s.heading.toFixed(0) + '  pitch ' + s.pitch.toFixed(1) + '  roll ' + s.roll.toFixed(1) + '  gs ' + s.groundSpeed.toFixed(1) + ' m/s  onGround ' + s.onGround + (s.crashed ? '  <span class="bad">CRASHED: ' + s.crashReason + '</span>' : '') +
+        '\ncamera ' + ['', 'turntable', 'cockpit', 'chase', 'front', 'top'][mode] + (mode === 2 ? '  (horizon must be visible through the windscreen)' : '');
+    }
+  }
+  frame();
+})();
+</script>
+</body>
+</html>

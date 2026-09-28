@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Taipei Skies — HUD test bench</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap">
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: #0a1420; color: #e8eef4;
+    font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; }
+  body { position: relative; }
+  #app { position: absolute; inset: 0; overflow: hidden; }
+  /* stand-in for the 3D view: hazy sky over a city-coloured ground */
+  #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; cursor: crosshair; touch-action: none;
+    background: linear-gradient(180deg, #5c8fc9 0%, #a9c8e6 42%, #d9dfe2 50%, #6b7a6a 52%, #4b5a49 100%); }
+  #bench { position: absolute; left: 6px; top: 52px; width: 96px; z-index: 100; display: flex; flex-direction: column; gap: 2px; }
+  #bench button { font: 500 10px 'IBM Plex Mono', monospace; padding: 2px 5px; background: rgba(8,18,28,.85); color: #cfe3f2; border: 1px solid #2a4256; border-radius: 4px; cursor: pointer; text-align: left; }
+  #bench button:hover { background: #24455f; }
+  #bench .h { font: 600 10px 'Barlow Condensed', sans-serif; letter-spacing: .14em; text-transform: uppercase; color: #9fb4c6; margin: 4px 0 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="gl" tabindex="0" aria-label="Fake flight view"></canvas>
+</div>
+<div id="bench"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="../js/config.js"></script>
+<script>
+/* ---- fake peers: aircraft, nav, airports, world, game, camera ---- */
+(function () {
+  'use strict';
+  const FS = window.FS, V3 = THREE.Vector3, D2R = Math.PI / 180, R2D = 180 / Math.PI, G = FS.geo;
+  const thr = { x: 2000, z: -2200 }, RWY_HDG = 96, dir = G.headingToDir(RWY_HDG), ELEV = 5.5;
+  const END = { key: 'RCSS-10', icao: 'RCSS', airportName: 'Taipei Songshan', id: '10', heading: RWY_HDG, dir, threshold: thr, elev: ELEV, length: 2605, width: 60,
+    oppositeThreshold: { x: thr.x + dir.x * 2605, z: thr.z + dir.z * 2605 }, tdz: { x: thr.x + dir.x * 300, z: thr.z + dir.z * 300 },
+    center: { x: thr.x + dir.x * 1302, z: thr.z + dir.z * 1302 }, spawn: { x: thr.x + dir.x * 150, z: thr.z + dir.z * 150, heading: RWY_HDG }, papi: { x: thr.x + 300, z: thr.z + 80, side: 'left' } };
+  FS.airports = { list: [], getRunwayEnd: () => END, getRunwayEnds: () => [END], nearest: () => ({ icao: 'RCSS', tower: { x: thr.x + 900, y: 45, z: thr.z + 350 } }), update() {} };
+  FS.world = { getHeight: () => ELEV, isWater: () => false, update() {}, setShadowFocus() {} };
+  FS.city = { getObstacleTop: () => -Infinity };
+
+  const st = { pos: new V3(), vel: new V3(), forward: new V3(0, 0, -1), up: new V3(0, 1, 0), right: new V3(1, 0, 0), quat: new THREE.Quaternion(),
+    airspeed: 0, groundSpeed: 0, altitude: ELEV, agl: 0, heading: RWY_HDG, pitch: 0, roll: 0, vs: 0, alpha: 2, beta: 0, throttle: 0, rpm: 700, flaps: 0,
+    brakes: false, onGround: true, onRunway: END, crashed: false, crashReason: '', stall: false, gForce: 1, terrainHeight: ELEV, elevator: 0, aileron: 0, rudder: 0, mouseActive: false };
+  const demo = { stall: false, pullUp: false, overspeed: false, established: false };
+  FS.aircraft = {
+    state: st, group: new THREE.Group(), eyePoint: new V3(0, 1, -0.4), chaseOffset: new V3(0, 4.5, 17),
+    params: { mass: 1100, wingArea: 16, wingSpan: 11, maxThrust: 3200, gearHeight: 1.1, vSpeeds: { rotate: 28, approach: 33, stall: 24, stallFlaps: 21, cruise: 60, never: 82 } },
+    reset(o) {
+      st.pos.set(o.x, o.onGround ? ELEV : o.altitude, o.z); st.heading = o.heading; st.altitude = st.pos.y; st.agl = st.altitude - ELEV;
+      st.airspeed = st.groundSpeed = o.speed || 0; st.throttle = o.throttle || 0; st.flaps = o.flaps || 0; st.onGround = !!o.onGround;
+      st.pitch = 0; st.roll = 0; st.vs = 0; st.crashed = false; st.crashReason = ''; st.stall = false; st.brakes = false; st.gForce = 1;
+      demo.stall = demo.pullUp = demo.overspeed = false;
+      FS.events.emit('reset', {});
+    },
+    update(dt) {
+      if (st.crashed) return;
+      const inp = FS.input, sens = FS.settings.mouseSensitivity || 1;
+      let pitchCmd = inp.axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']); if (FS.settings.invertKeyPitch) pitchCmd = -pitchCmd;
+      let rollCmd = inp.axis(['KeyA', 'ArrowLeft'], ['KeyD', 'ArrowRight']);
+      if (inp.mouse.active) { rollCmd += inp.mouse.x * sens; pitchCmd += inp.mouse.y * sens * (FS.settings.invertMouseY ? -1 : 1); }
+      pitchCmd = G.clamp(pitchCmd, -1, 1); rollCmd = G.clamp(rollCmd, -1, 1);
+      st.elevator = pitchCmd; st.aileron = rollCmd; st.rudder = inp.axis(['KeyQ'], ['KeyE']);
+      if (inp.isDown('ShiftLeft', 'ShiftRight', 'PageUp')) st.throttle += 0.5 * dt;
+      if (inp.isDown('ControlLeft', 'ControlRight', 'PageDown')) st.throttle -= 0.5 * dt;
+      st.throttle = G.clamp(st.throttle - inp.wheel * 0.0005, 0, 1);
+      if (inp.wasPressed('KeyF')) st.flaps = st.flaps >= 1 ? 0 : st.flaps + 0.5;
+      if (inp.wasPressed('KeyB')) st.brakes = !st.brakes;
+      const brakes = st.brakes || inp.isDown('Space');
+      st.rpm = 700 + st.throttle * 1900;
+      st.mouseActive = inp.mouse.active;
+      if (st.onGround) {
+        st.airspeed = Math.max(0, st.airspeed + (st.throttle * 9 - 1.5 - (brakes ? 7 : 0)) * dt);
+        st.pitch = G.clamp(st.pitch + pitchCmd * 12 * dt - st.pitch * 2 * dt, -2, 12);
+        st.roll -= st.roll * 4 * dt;
+        st.heading = G.wrap360(st.heading + st.rudder * 25 * dt * Math.min(1, st.airspeed / 10));
+        st.vs = 0; st.altitude = ELEV; st.agl = 0; st.gForce = 1; st.stall = false;
+        if (st.airspeed > 28 && st.pitch > 4) { st.onGround = false; st.vs = 2; FS.events.emit('takeoff', { runwayEnd: END }); }
+      } else {
+        st.roll = G.clamp(st.roll + rollCmd * 70 * dt - (rollCmd ? 0 : st.roll * 0.35 * dt), -85, 85);
+        st.pitch = G.clamp(st.pitch + pitchCmd * 22 * dt - (st.pitch - 2) * 0.25 * dt, -35, 35);
+        st.heading = G.wrap360(st.heading + (Math.tan(st.roll * D2R) * 9.81 / Math.max(st.airspeed, 15)) * R2D * dt);
+        const target = 18 + st.throttle * 62 - st.pitch * 0.9 - st.flaps * 10;
+        st.airspeed += (target - st.airspeed) * 0.35 * dt;
+        if (demo.overspeed) st.airspeed = 90;
+        st.stall = demo.stall || st.airspeed < (st.flaps > 0.4 ? 21 : 24);
+        st.vs = st.airspeed * Math.sin((st.pitch - 3 + (st.stall ? -12 : 0)) * D2R);
+        if (demo.pullUp) { st.vs = -7.5; st.altitude = ELEV + 80; }
+        st.altitude += st.vs * dt; st.agl = st.altitude - ELEV;
+        st.gForce = 1 / Math.max(0.2, Math.cos(st.roll * D2R)) + pitchCmd * 0.6;
+        st.beta = st.rudder * 6;
+        if (st.agl <= 0) {
+          const along = G.alongTrack(st.pos.x, st.pos.z, thr.x, thr.z, dir.x, dir.z), cross = G.crossTrack(st.pos.x, st.pos.z, thr.x, thr.z, dir.x, dir.z);
+          const onRwy = along > -50 && along < 2650 && Math.abs(cross) < 40;
+          st.onGround = true; st.altitude = ELEV; st.agl = 0;
+          if (st.vs < -6 || Math.abs(st.roll) > 35) { st.crashed = true; st.crashReason = 'Hit the ground at ' + Math.round(-st.vs * 196.85) + ' ft/min'; FS.events.emit('crash', { reason: st.crashReason }); return; }
+          FS.events.emit('touchdown', { vs: st.vs, speed: st.airspeed, x: st.pos.x, z: st.pos.z, runwayEnd: onRwy ? END : null, crossTrack: cross, alongFromThreshold: along, hard: st.vs < -3 });
+          st.vs = 0; st.pitch = 0; st.roll = 0;
+        }
+      }
+      const h = st.heading * D2R, p = st.pitch * D2R, hs = Math.sqrt(Math.max(0, st.airspeed * st.airspeed - st.vs * st.vs));
+      st.groundSpeed = hs;
+      st.pos.x += Math.sin(h) * hs * dt; st.pos.z += -Math.cos(h) * hs * dt; st.pos.y = st.altitude;
+      st.vel.set(Math.sin(h) * hs, st.vs, -Math.cos(h) * hs);
+      st.forward.set(Math.sin(h) * Math.cos(p), Math.sin(p), -Math.cos(h) * Math.cos(p));
+      st.quat.setFromEuler(new THREE.Euler(p, G.headingToYaw(st.heading), -st.roll * D2R, 'YXZ'));
+      st.up.set(0, 1, 0).applyQuaternion(st.quat);
+      FS.aircraft.group.position.copy(st.pos); FS.aircraft.group.quaternion.copy(st.quat);
+    },
+  };
+
+  const nav = FS.nav = { target: END, phase: 'takeoff', gatesEnabled: true, guidance: {}, passed: 0,
+    setTarget(t) { nav.target = t; }, setPhase(p) { nav.phase = p; nav.passed = 0; }, autoTarget: () => END, cycleTarget() {},
+    update() {
+      const px = st.pos.x, pz = st.pos.z, dx = thr.x - px, dz = thr.z - pz, dist = Math.hypot(dx, dz);
+      const along = G.alongTrack(px, pz, thr.x, thr.z, dir.x, dir.z), cross = G.crossTrack(px, pz, thr.x, thr.z, dir.x, dir.z);
+      let locDev = -Math.atan2(cross, Math.max(dist, 1)) * R2D;
+      const desiredAlt = ELEV + 15 + Math.max(dist, 0) * Math.tan(3 * D2R);
+      let gsDev = Math.atan2(st.altitude - ELEV - 15, Math.max(dist, 1)) * R2D - 3;
+      if (demo.established) { locDev = 0; gsDev = 0; }
+      const desiredHeading = G.wrap360(RWY_HDG - G.clamp(cross / 25, -30, 30));
+      const headingError = G.wrap180(desiredHeading - st.heading);
+      const total = 12, passed = G.clamp(Math.floor((11000 - dist) / 800), 0, total);
+      if (passed > nav.passed && nav.phase === 'landing') { nav.passed = passed; FS.events.emit('gatePassed', { index: passed - 1, total }); }
+      const papi = gsDev > 0.5 ? 'WWWW' : gsDev > 0.15 ? 'WWWR' : gsDev > -0.15 ? 'WWRR' : gsDev > -0.5 ? 'WRRR' : 'RRRR';
+      let wp, instruction;
+      if (nav.phase === 'takeoff') {
+        wp = { x: px + dir.x * 3000, y: st.altitude + 250, z: pz + dir.z * 3000, name: 'CLIMB' };
+        instruction = st.onGround ? 'Full throttle · rotate at 54 kt' : 'Climb straight ahead to 1,500 ft';
+      } else {
+        const t = Math.max(dist - 1500, 0);
+        wp = { x: thr.x - dir.x * t, y: ELEV + 15 + t * Math.tan(3 * D2R), z: thr.z - dir.z * t, name: dist > 1500 ? 'FAF' : 'RW10' };
+        const turn = Math.abs(headingError) > 3 ? 'Turn ' + (headingError > 0 ? 'right' : 'left') + ' to ' : 'Fly ';
+        const vert = st.altitude > desiredAlt + 15 ? 'descend' : st.altitude < desiredAlt - 15 ? 'climb' : 'hold';
+        instruction = turn + String(Math.round(desiredHeading)).padStart(3, '0') + '° · ' + vert + ' to ' + Math.round(desiredAlt * 3.28084 / 10) * 10 + ' ft';
+      }
+      nav.guidance = { target: nav.target, phase: nav.phase, dist, bearing: G.dirToHeading(dx, dz), alongTrack: along, crossTrack: cross, locDev, gsDev, desiredAlt, altError: st.altitude - desiredAlt,
+        desiredHeading, headingError, onFinal: dist < 15000 && Math.abs(locDev) < 10, established: Math.abs(locDev) < 0.5 && Math.abs(gsDev) < 0.3,
+        wp, gates: { total: nav.phase === 'landing' ? total : 0, passed: nav.passed, next: nav.passed }, instruction, speedCue: nav.phase === 'landing' ? 33 : 40, papi };
+    },
+    drawMinimap(canvas, range) {
+      const k = canvas.getContext('2d'), size = canvas.width, c = size / 2, sc = size / (2 * range), px = st.pos.x, pz = st.pos.z;
+      k.setTransform(1, 0, 0, 1, 0, 0); k.fillStyle = '#12303a'; k.fillRect(0, 0, size, size);
+      k.fillStyle = '#1b4a3a'; k.fillRect(0, c + (-2000 - pz) * sc, size, 4000 * sc); // a green band as "city"
+      k.strokeStyle = 'rgba(79,227,255,.15)'; k.lineWidth = 1;
+      const step = range >= 20000 ? 5000 : 1000;
+      for (let gx = Math.floor((px - range) / step) * step; gx <= px + range; gx += step) { const x = c + (gx - px) * sc; k.beginPath(); k.moveTo(x, 0); k.lineTo(x, size); k.stroke(); }
+      for (let gz = Math.floor((pz - range) / step) * step; gz <= pz + range; gz += step) { const y = c + (gz - pz) * sc; k.beginPath(); k.moveTo(0, y); k.lineTo(size, y); k.stroke(); }
+      k.setLineDash([6, 4]); k.strokeStyle = '#ff6ad5'; k.lineWidth = 1.5;
+      k.beginPath(); k.moveTo(c + (thr.x - px) * sc, c + (thr.z - pz) * sc); k.lineTo(c + (thr.x - dir.x * 11000 - px) * sc, c + (thr.z - dir.z * 11000 - pz) * sc); k.stroke(); k.setLineDash([]);
+      k.strokeStyle = '#4fe3ff'; k.lineWidth = Math.max(3, 60 * sc); k.beginPath(); k.moveTo(c + (thr.x - px) * sc, c + (thr.z - pz) * sc); k.lineTo(c + (END.oppositeThreshold.x - px) * sc, c + (END.oppositeThreshold.z - pz) * sc); k.stroke();
+      k.save(); k.translate(c, c); k.rotate(st.heading * D2R); k.fillStyle = '#8ff7a5'; k.beginPath(); k.moveTo(0, -9); k.lineTo(6, 8); k.lineTo(0, 4); k.lineTo(-6, 8); k.closePath(); k.fill(); k.restore();
+      k.fillStyle = '#9fb4c6'; k.font = '600 12px Barlow Condensed'; k.textBaseline = 'top'; k.fillText('N', 6, 4);
+    } };
+
+  const cam = FS.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.3, 150000);
+  const game = FS.game = {
+    running: false, paused: false, scenario: null, cameraMode: 'chase', time: 0, fps: 60, cameraModes: ['chase', 'cockpit', 'tower', 'flyby'],
+    scenarios: [
+      { id: 'takeoff-RCSS-10', title: 'Take off from Songshan', subtitle: 'RCSS runway 10 · downtown Taipei · wind calm', kind: 'takeoff', runway: 'RCSS-10' },
+      { id: 'takeoff-RCSS-28', title: 'Take off from Songshan (west)', subtitle: 'RCSS runway 28 · climb out over the Tamsui River', kind: 'takeoff', runway: 'RCSS-28' },
+      { id: 'free-xinyi', title: 'Airborne over Taipei 101', subtitle: '2,500 ft over Xinyi at 100 kt · fly anywhere', kind: 'airborne' },
+      { id: 'final-RCSS-10', title: 'Final approach to Songshan', subtitle: 'ILS runway 10 · 6 nm out on the glideslope', kind: 'final', runway: 'RCSS-10' },
+    ],
+    start(id) {
+      const sc = game.scenarios.find((s) => s.id === id) || game.scenarios[0]; game.scenario = sc;
+      if (sc.kind === 'takeoff') { FS.aircraft.reset({ x: END.spawn.x, z: END.spawn.z, heading: RWY_HDG, onGround: true, speed: 0, throttle: 0, flaps: 0 }); nav.setPhase('takeoff'); }
+      else if (sc.kind === 'final') { const d = 11000; FS.aircraft.reset({ x: thr.x - dir.x * d, z: thr.z - dir.z * d, altitude: ELEV + 15 + d * Math.tan(3 * D2R) + 40, heading: RWY_HDG - 6, onGround: false, speed: 36, throttle: 0.45, flaps: 0.5 }); nav.setPhase('landing'); }
+      else { FS.aircraft.reset({ x: 3600, z: 4200, altitude: 760, heading: 345, onGround: false, speed: 52, throttle: 0.7, flaps: 0 }); nav.setPhase('free'); }
+      game.running = true; game.paused = false; FS.input.enabled = true; FS.hud.hideMenu();
+      try { document.getElementById('gl').focus(); } catch (e) { /* ignore */ }
+      FS.events.emit('scenarioStart', sc);
+    },
+    restart() { if (game.scenario) game.start(game.scenario.id); },
+    setPaused(b) { game.paused = !!b; FS.events.emit('pause', game.paused); },
+    setCameraMode(m) { if (game.cameraModes.indexOf(m) < 0) return; game.cameraMode = m; FS.settings.cameraMode = m; FS.events.emit('cameraMode', m); FS.hud.showMessage('Camera: ' + m, 1200); },
+    cycleCamera() { const i = game.cameraModes.indexOf(game.cameraMode); game.setCameraMode(game.cameraModes[(i + 1) % 4]); },
+    openMenu() { if (game.running) game.setPaused(true); FS.input.enabled = false; FS.input.setMouseActive(false); FS.hud.showMenu(); },
+    closeMenu() { FS.input.enabled = true; FS.hud.hideMenu(); if (game.running) game.setPaused(false); },
+  };
+
+  function updateCamera() {
+    const off = new V3(0, 4.5, 17).applyAxisAngle(new V3(0, 1, 0), G.headingToYaw(st.heading));
+    cam.position.copy(st.pos).add(off); cam.up.set(0, 1, 0);
+    cam.lookAt(new V3().copy(st.pos).addScaledVector(st.forward, 12).add(new V3(0, 1, 0)));
+    if (cam.aspect !== window.innerWidth / window.innerHeight) { cam.aspect = window.innerWidth / window.innerHeight; cam.updateProjectionMatrix(); }
+  }
+  function hotkeys() {
+    const inp = FS.input;
+    if (inp.wasPressed('Escape')) { if (FS.hud.isMenuOpen()) game.closeMenu(); else if (game.running) game.openMenu(); }
+    if (!inp.enabled) return;
+    if (inp.wasPressed('KeyC')) game.cycleCamera();
+    ['Digit1', 'Digit2', 'Digit3', 'Digit4'].forEach((k, i) => { if (inp.wasPressed(k)) game.setCameraMode(game.cameraModes[i]); });
+    if (inp.wasPressed('KeyP') && game.running) game.setPaused(!game.paused);
+    if (inp.wasPressed('KeyR') && game.running) game.restart();
+  }
+
+  // ---- bench buttons ----
+  const bench = document.getElementById('bench');
+  const add = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', () => { fn(); b.blur(); }); bench.appendChild(b); };
+  const head = (t) => { const d = document.createElement('div'); d.className = 'h'; d.textContent = t; bench.appendChild(d); };
+  head('Overlays');
+  add('Report A', () => FS.hud.showLandingReport({ vs: -0.5, speed: 28, runwayEnd: END, crossTrack: -2.1, alongFromThreshold: 320, hard: false }, { gatesPassed: 12, gatesTotal: 12 }));
+  add('Report D', () => FS.hud.showLandingReport({ vs: -3.4, speed: 35, runwayEnd: END, crossTrack: 14, alongFromThreshold: 900, hard: true }, { gatesPassed: 7, gatesTotal: 12 }));
+  add('Off-airport', () => FS.hud.showLandingReport({ vs: -1.2, speed: 30, runwayEnd: null, crossTrack: 0, alongFromThreshold: 0, hard: false }));
+  add('Crash', () => { st.crashed = true; st.crashReason = 'Flew into the Xinyi towers'; FS.events.emit('crash', { reason: st.crashReason }); });
+  add('Toast', () => FS.hud.showMessage('MOUSE STICK ON', 2000));
+  add('Big toast', () => FS.hud.showMessage('LANDED · RCSS 10', 3000, { big: true }));
+  add('Gate chime', () => FS.events.emit('gatePassed', { index: 3, total: 12 }));
+  add('Menu (Esc)', () => game.openMenu());
+  add('Help (H)', () => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyH' })));
+  add('Pause (P)', () => game.setPaused(!game.paused));
+  head('State');
+  add('Stall', () => { demo.stall = !demo.stall; });
+  add('Pull up', () => { demo.pullUp = !demo.pullUp; });
+  add('Overspeed', () => { demo.overspeed = !demo.overspeed; });
+  add('Established', () => { demo.established = !demo.established; });
+  add('Phase', () => { const p = ['takeoff', 'free', 'landing']; nav.setPhase(p[(p.indexOf(nav.phase) + 1) % 3]); });
+  add('Mouse stick', () => FS.input.setMouseActive(!FS.input.mouse.active));
+  add('Brakes+thr', () => { st.brakes = true; st.throttle = 0.6; });
+  add('Map (M)', () => FS.hud.cycleMinimap());
+
+  // ---- boot (called once js/hud.js has loaded) ----
+  window.benchBoot = function () {
+    FS.settings.load();
+    const gl = document.getElementById('gl');
+    FS.input.bind(gl);
+    FS.hud.init();
+    FS.aircraft.reset({ x: END.spawn.x, z: END.spawn.z, heading: RWY_HDG, onGround: true, speed: 0, throttle: 0, flaps: 0 });
+    nav.setPhase('takeoff');
+    FS.input.enabled = false;
+    FS.hud.showStartMenu();
+    let last = performance.now(), acc = 0, n = 0;
+    function frame(t) {
+      requestAnimationFrame(frame);
+      const dt = Math.min((t - last) / 1000, 0.05); last = t;
+      acc += dt; n++; if (acc > 0.5) { game.fps = Math.round(n / acc); acc = 0; n = 0; }
+      hotkeys();
+      if (game.running && !game.paused) { game.time += dt; FS.aircraft.update(dt); nav.update(dt); }
+      updateCamera();
+      FS.hud.update(dt);
+      FS.input.endFrame();
+    }
+    requestAnimationFrame(frame);
+  };
+})();
+</script>
+<script src="../js/hud.js"></script>
+<script>window.benchBoot();</script>
+</body>
+</html>

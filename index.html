@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Browser flight simulator over a procedurally rebuilt Taipei: fly a Cessna 172 with mouse or WASD, and land at Songshan or Taoyuan with ILS-style guidance.">
+<title>Taipei Skies</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap">
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: #0a1420; color: #e8eef4;
+    font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; }
+  body { position: relative; }
+  #app { position: absolute; inset: 0; overflow: hidden; }
+  #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; cursor: crosshair; touch-action: none; }
+  #loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    background: radial-gradient(ellipse at 50% 60%, #12304a 0%, #0a1420 70%); z-index: 50; text-align: center; padding: 0 16px; }
+  #loading .title { font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: clamp(34px, 7vw, 64px); letter-spacing: 0.18em; color: #f2f6fa; }
+  #loading .sub { font-size: 13px; color: #9fb4c6; letter-spacing: 0.08em; text-transform: uppercase; }
+  #loading-status { font-size: 13px; color: #c9d7e3; min-height: 1.4em; }
+  #loading .bar { width: min(420px, 80vw); height: 4px; background: #1d3448; border-radius: 2px; overflow: hidden; }
+  #loading-bar { height: 100%; width: 0; background: #5fc9f2; transition: width .3s ease; }
+  #errbox { position: absolute; left: 16px; right: 16px; bottom: 16px; max-height: 40%; overflow: auto; z-index: 60;
+    background: #3b0f14; color: #ffd7d7; border: 1px solid #7a2b33; border-radius: 6px; padding: 10px 12px; font-size: 12px; white-space: pre-wrap; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="gl" tabindex="0" aria-label="Flight simulator view"></canvas>
+  <div id="loading">
+    <div class="title">TAIPEI SKIES</div>
+    <div class="sub">Songshan · Xinyi · Yangmingshan · Tamsui</div>
+    <div class="bar"><div id="loading-bar"></div></div>
+    <div id="loading-status">Starting…</div>
+  </div>
+  <div id="errbox" hidden></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="js/config.js"></script>
+<script src="js/world.js"></script>
+<script src="js/city.js"></script>
+<script src="js/airports.js"></script>
+<script src="js/aircraft.js"></script>
+<script src="js/nav.js"></script>
+<script src="js/hud.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
